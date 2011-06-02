@@ -1811,7 +1811,8 @@ check_for_consoles (state_t    *state,
 {
   const char *console_string;
   const char *remaining_command_line;
-  char *console;
+  const char *console;
+  bool       found_console = false;
   ply_hashtable_t *consoles;
 
   ply_trace ("checking for consoles%s",
@@ -1826,35 +1827,59 @@ check_for_consoles (state_t    *state,
                                                                  "console=")) != NULL)
     {
       char *end;
+      size_t len;
+      bool is_vt_console = false;
 
-      remaining_command_line = console_string;
+      if (strncmp (console_string, "/dev/", strlen ("/dev/")) == 0)
+        console_string += strlen ("/dev/");
 
-      state->should_force_details = true;
+      end = strpbrk (console_string, " \n\t\v,");
+      len = (end == NULL) ? strlen (console_string) : (size_t) (end - console_string);
 
-      console = strdup (console_string);
+      remaining_command_line = console_string + len;
 
-      end = strpbrk (console, " \n\t\v,");
+      if (len == 0) continue;
 
-      if (end != NULL)
-        *end = '\0';
+      console = strndupa (console_string, len);
 
-      if (strcmp (console, "tty0") == 0 || strcmp (console, "/dev/tty0") == 0)
+      /* filter out tty, tty[0-63] */
+      if (strncmp (console, "tty", strlen ("tty")) == 0)
         {
-          free (console);
-          console = strdup (default_tty);
+          char *p;
+          long vt_num = strtol (console + strlen ("tty"), &p, 0);
+
+          if (*p == '\0' && vt_num >=0 && vt_num <=63)
+            {
+              if (vt_num == 0) /* tty or tty0 */
+                console = default_tty;
+              is_vt_console = true;
+            }
         }
 
-      ply_trace ("serial console %s found!", console);
-      ply_hashtable_insert (consoles, console, NULL);
+      if (!found_console)
+        {
+          ply_trace ("kernel console tty is %s", console);
 
-      remaining_command_line += strlen (console);
+          free (state->kernel_console_tty);
+          state->kernel_console_tty = strdup (console);
+
+          found_console = true;
+        }
+
+      if (is_vt_console == false)
+        {
+          ply_trace ("serial console %s found!", console);
+          ply_hashtable_insert (consoles, (void *) console, NULL);
+
+          state->should_force_details = true;
+        }
     }
 
-  free (state->kernel_console_tty);
-  state->kernel_console_tty = NULL;
-
-  if (console != NULL)
-    state->kernel_console_tty = strdup (console);
+  if (!found_console)
+    {
+      free (state->kernel_console_tty);
+      state->kernel_console_tty = NULL;
+    }
 
   if (should_add_displays)
     {
@@ -1864,7 +1889,6 @@ check_for_consoles (state_t    *state,
                              state);
     }
 
-  ply_hashtable_foreach (consoles, (ply_hashtable_foreach_func_t *) free, NULL);
   ply_hashtable_free (consoles);
 
   ply_trace ("After processing serial consoles there are now %d text displays",
