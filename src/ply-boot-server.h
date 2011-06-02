@@ -34,6 +34,9 @@ typedef struct _ply_boot_server ply_boot_server_t;
 
 typedef void (* ply_boot_server_update_handler_t) (void              *user_data,
                                                    const char        *status,
+                                                   const char        *detailed_status,
+                                                   int                pid,
+                                                   int                uid,
                                                    ply_boot_server_t *server);
 
 typedef void (* ply_boot_server_newroot_handler_t) (void              *user_data,

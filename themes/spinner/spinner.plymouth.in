@@ -11,3 +11,10 @@ Transition=none
 TransitionDuration=0.0
 BackgroundStartColor=0x202020
 BackgroundEndColor=0x202020
+
+[fsck]
+FsckPrompt=Checking filesystem:
+FsckPrompt[zh_CN]=检查文件系统:
+CancelFsckPrompt=Press 'C' to skip filesystem check
+CancelFsckPrompt[zh_CN]=按下大写'C'键来跳过文件系统检查
+CancelKey=C

@@ -38,6 +38,7 @@
 #include "ply-logger.h"
 #include "ply-trigger.h"
 #include "ply-utils.h"
+#include "ply-proc.h"
 
 typedef struct
 {
@@ -197,7 +198,8 @@ ply_boot_server_stop_listening (ply_boot_server_t *server)
 static bool
 ply_boot_connection_read_request (ply_boot_connection_t  *connection,
                                   char                  **command,
-                                  char                  **argument)
+                                  char                  **argument,
+                                  char                  **detailed_argument)
 {
   uint8_t header[2];
 
@@ -213,36 +215,62 @@ ply_boot_connection_read_request (ply_boot_connection_t  *connection,
   *command[0] = header[0];
 
   *argument = NULL;
-  if (header[1] == '\002')
+  *detailed_argument = NULL;
+  if (header[1] == '\002' || header[1] == '\003')
     {
       uint8_t argument_size;
 
       if (!ply_read (connection->fd, &argument_size, sizeof (uint8_t)))
-        {
-          free (*command);
-          return false;
-        }
+        goto fail;
 
       *argument = calloc (argument_size, sizeof (char));
 
       if (!ply_read (connection->fd, *argument, argument_size))
+        goto fail;
+
+      if (header[1] == '\003')
         {
-          free (*argument);
-          free (*command);
-          return false;
+          uint8_t detailed_argument_size;
+
+          if (!ply_read (connection->fd, &detailed_argument_size, sizeof (uint8_t)))
+            goto fail;
+
+          *detailed_argument = calloc (detailed_argument_size, sizeof (char));
+
+          if (!ply_read (connection->fd, *detailed_argument, detailed_argument_size))
+            goto fail;
         }
     }
 
   if (!ply_get_credentials_from_fd (connection->fd, &connection->pid, &connection->uid, NULL))
     {
       ply_trace ("couldn't read credentials from connection: %m");
-      free (*argument);
-      free (*command);
-      return false;
+      goto fail;
     }
   connection->credentials_read = true;
 
   return true;
+
+fail:
+  if (*command)
+    {
+      free (*command);
+      *command = NULL;
+    }
+
+  if (*argument)
+    {
+      free (*argument);
+      *argument = NULL;
+    }
+
+  if (*detailed_argument)
+    {
+      free (*detailed_argument);
+      *detailed_argument = NULL;
+    }
+
+  return false;
 }
 
 static bool
@@ -373,7 +401,7 @@ static void
 ply_boot_connection_on_request (ply_boot_connection_t *connection)
 {
   ply_boot_server_t *server;
-  char *command, *argument;
+  char *command, *argument, *detailed_argument;
 
   assert (connection != NULL);
   assert (connection->fd >= 0);
@@ -382,7 +410,7 @@ ply_boot_connection_on_request (ply_boot_connection_t *connection)
   assert (server != NULL);
 
   if (!ply_boot_connection_read_request (connection,
-                                         &command, &argument))
+                                         &command, &argument, &detailed_argument))
     {
       ply_trace ("could not read connection request");
       return;
@@ -414,7 +442,10 @@ ply_boot_connection_on_request (ply_boot_connection_t *connection)
 
       ply_trace ("got update request");
       if (server->update_handler != NULL)
-        server->update_handler (server->user_data, argument, server);
+        server->update_handler (server->user_data, argument, detailed_argument,
+                                connection->pid, connection->uid, server);
+
+      if (detailed_argument) free (detailed_argument);
       free (argument);
       free (command);
       return;

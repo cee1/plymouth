@@ -39,7 +39,11 @@
 #include <values.h>
 #include <unistd.h>
 #include <wchar.h>
+#include <sys/types.h>
+#include <signal.h>
 
+#include "ply-proc.h"
+#include "ply-hashtable.h"
 #include "ply-boot-splash-plugin.h"
 #include "ply-buffer.h"
 #include "ply-entry.h"
@@ -68,6 +72,10 @@
 #define SHOW_ANIMATION_PERCENT 0.9
 #endif
 
+#ifndef SHOW_N_DETAILS
+#define SHOW_N_DETAILS 2
+#endif
+
 typedef enum {
    PLY_BOOT_SPLASH_DISPLAY_NORMAL,
    PLY_BOOT_SPLASH_DISPLAY_QUESTION_ENTRY,
@@ -92,6 +100,16 @@ typedef struct
   ply_rectangle_t box_area, lock_area;
   ply_trigger_t *end_trigger;
 } view_t;
+
+typedef struct {
+  char *status;
+  char *detail;
+  int n_credentials;
+  struct {
+    int pid;
+    int uid;
+  } *credentials;
+} detailed_status_t;
 
 struct _ply_boot_splash_plugin
 {
@@ -120,13 +138,27 @@ struct _ply_boot_splash_plugin
   ply_trigger_t *idle_trigger;
   ply_trigger_t *stop_trigger;
 
+  ply_hashtable_t *pid_map;
+  ply_list_t *detailed_status;
+
   uint32_t root_is_mounted : 1;
   uint32_t is_visible : 1;
   uint32_t is_animating : 1;
   uint32_t is_idle : 1;
+
+  const char *fsck_prompt;
+  const char *cancel_fsck_prompt;
+  const char *cancel_key;
 };
 
 ply_boot_splash_plugin_interface_t * ply_boot_splash_plugin_get_interface (void);
+
+static void on_fsck_abort (ply_boot_splash_plugin_t *plugin, int pid);
+static bool start_monitor_fsck_pid (ply_boot_splash_plugin_t *plugin,
+                                    int pid);
+static void stop_monitor_fsck_pid (ply_boot_splash_plugin_t *plugin,
+                                   int pid);
+static void stop_monitor_all_fsck_pids (ply_boot_splash_plugin_t *plugin);
 
 static void stop_animation (ply_boot_splash_plugin_t *plugin,
                             ply_trigger_t            *idle_trigger);
@@ -161,7 +193,8 @@ view_new (ply_boot_splash_plugin_t *plugin,
   view->label = ply_label_new ();
   view->message_label = ply_label_new ();
   ply_label_set_text (view->message_label, "");
-  ply_label_show (view->message_label, view->display, 10, 10);
+  ply_label_show (view->message_label, view->display,
+                  10, 0.82 * ply_pixel_display_get_height (view->display));
 
   return view;
 }
@@ -496,6 +529,15 @@ view_hide_prompt (view_t *view)
   ply_label_hide (view->label);
 }
 
+static void
+detailed_status_free (detailed_status_t *n)
+{
+  free (n->status);
+  free (n->detail);
+  free (n->credentials);
+  free (n);
+}
+
 static ply_boot_splash_plugin_t *
 create_plugin (ply_key_file_t *key_file)
 {
@@ -606,6 +648,18 @@ create_plugin (ply_key_file_t *key_file)
     }
 
   plugin->views = ply_list_new ();
+  plugin->detailed_status = ply_list_new (); 
+  plugin->pid_map = ply_hashtable_new (ply_hashtable_direct_hash,
+                                       ply_hashtable_direct_compare);
+
+  plugin->fsck_prompt = \
+    ply_key_file_get_value_locale (key_file, "fsck", "FsckPrompt", NULL)? : \
+    strdup ("Checking filesystem>");
+  plugin->cancel_fsck_prompt = \
+    ply_key_file_get_value_locale (key_file, "fsck", "CancelFsckPrompt", NULL)? : \
+    strdup ("Press 'C' to skip filesystem check");
+  plugin->cancel_key = ply_key_file_get_value (key_file, "fsck", "CancelKey")? : \
+                                               strdup ("C");
 
   return plugin;
 }
@@ -638,6 +692,22 @@ free_views (ply_boot_splash_plugin_t *plugin)
 }
 
 static void
+free_detailed_status (ply_boot_splash_plugin_t *plugin)
+{
+  ply_list_node_t *n = ply_list_get_first_node (plugin->detailed_status);
+  ply_list_node_t *curr;
+  while ((curr = n))
+    {
+      n = ply_list_get_next_node (plugin->detailed_status, curr);
+
+      detailed_status_t *s = ply_list_node_get_data (curr);
+      detailed_status_free (s);
+
+      ply_list_remove_node (plugin->detailed_status, curr);
+    }
+}
+
+static void
 destroy_plugin (ply_boot_splash_plugin_t *plugin)
 {
   if (plugin == NULL)
@@ -665,7 +735,13 @@ destroy_plugin (ply_boot_splash_plugin_t *plugin)
     ply_image_free (plugin->header_image);
 
   free (plugin->animation_dir);
+  free ((void *) plugin->fsck_prompt);
+  free ((void *) plugin->cancel_fsck_prompt);
+  free ((void *) plugin->cancel_key);
   free_views (plugin);
+  free_detailed_status (plugin);
+  ply_list_free (plugin->detailed_status);
+  ply_hashtable_free (plugin->pid_map);
   free (plugin);
 }
 
@@ -796,6 +872,12 @@ on_interrupt (ply_boot_splash_plugin_t *plugin)
 static void
 detach_from_event_loop (ply_boot_splash_plugin_t *plugin)
 {
+  stop_monitor_all_fsck_pids (plugin);
+
+  free_detailed_status (plugin);      
+  ply_hashtable_free (plugin->pid_map);
+  plugin->pid_map = ply_hashtable_new (ply_hashtable_direct_hash,
+                                       ply_hashtable_direct_compare);
   plugin->loop = NULL;
 }
 
@@ -1038,6 +1120,282 @@ update_status (ply_boot_splash_plugin_t *plugin,
   assert (plugin != NULL);
 }
 
+static char *
+format_detailed_status (ply_boot_splash_plugin_t *plugin)
+{
+  ply_list_node_t *iter;
+  detailed_status_t *n = NULL;
+  char *m[SHOW_N_DETAILS] = { NULL, }, *formatted_message;
+  char *p;
+  const char *fsck_prompt = plugin->fsck_prompt;
+  const char *cancel_fsck_prompt = plugin->cancel_fsck_prompt;
+  const char *prefix = "\t>";
+  int i = 0, formatted_message_len = 0;
+
+  for (i = 0, iter = ply_list_get_first_node (plugin->detailed_status);
+       iter && i < SHOW_N_DETAILS;
+       i++, iter = ply_list_get_next_node (plugin->detailed_status, iter))
+    {
+      n = ply_list_node_get_data (iter);
+      m[i] = n->detail;
+      formatted_message_len += \
+        strlen (n->detail) + strlen (prefix) + 1 /* '\n' */;
+    }
+
+  if (i) /* Has detailed status to display */
+    {
+      if (iter)
+        {
+          char *tmp = alloca (strlen ("... ") + strlen (cancel_fsck_prompt) + 1);
+          sprintf (tmp, "... %s", cancel_fsck_prompt);
+          cancel_fsck_prompt = tmp;
+        }
+      formatted_message_len += \
+        strlen (fsck_prompt) + strlen (cancel_fsck_prompt) + 2 /* '\n' of fsck_prompt + '\0' */;
+      formatted_message = malloc (formatted_message_len);
+
+      p = formatted_message;
+
+      strcpy(p, fsck_prompt);
+      p += strlen(fsck_prompt) + 1;
+      p[-1] = '\n';
+
+      for (i = 0; i < SHOW_N_DETAILS && m[i]; i++)
+        {
+          sprintf (p, "%s%s\n", prefix, m[i]);
+          p += strlen(p);
+        }
+      strcpy (p, cancel_fsck_prompt);
+    }
+  else
+    formatted_message = strdup ("");
+
+  return formatted_message;
+}
+
+static void
+update_status_detailed (ply_boot_splash_plugin_t *plugin,
+                        const char               *status,
+                        const char               *detailed_status,
+                        int                       pid,
+                        int                       uid)
+{
+  ply_list_node_t *iter;
+  char *formatted_message; 
+  detailed_status_t *n = NULL;
+  bool finished, new_pid;
+  int i;
+
+  assert (status);
+  assert (detailed_status);
+  assert (uid >= 0);
+  assert (pid >= 0);
+
+  finished = strlen (detailed_status) == 0;
+
+  iter = ply_hashtable_lookup (plugin->pid_map, (void *) (intptr_t) pid);
+
+  if (iter)
+    { /* a update for a known fsck pid(and a known fsck job) */
+      new_pid = false;
+
+      n = ply_list_node_get_data (iter);
+      if (strcmp (status, n->status) != 0)
+        /* A known fsck job gives a different status title, drop it */
+        goto finish;
+    }
+  else
+    { /* a new fsck job or (unlikely)
+       *   a new pid for a known fsck job. */
+      new_pid = true;
+
+      for (iter = ply_list_get_first_node (plugin->detailed_status); iter;
+           iter = ply_list_get_next_node (plugin->detailed_status, iter))
+        {
+          n = ply_list_node_get_data (iter);
+          if (strcmp (status, n->status) == 0) /* a new pid for a known fsck job. */
+            break;
+        }
+    }
+
+  n = iter ? n : NULL;
+
+  if (!n && finished) /* an unknown fsck job finished, ignore */
+    return;
+
+  if (finished)
+    {
+      ply_list_remove_node (plugin->detailed_status, iter);
+      for (i = 0; i < n->n_credentials; i++)
+        {
+          if (n->credentials[i].uid >= 0)
+            {
+              stop_monitor_fsck_pid (plugin, pid);
+              ply_hashtable_remove (plugin->pid_map, (void *) (intptr_t) n->credentials[i].pid);
+            }
+        }
+      detailed_status_free (n);
+      ply_trace ("fsck job '%s' finished.", status);
+    }
+  else
+    {
+      if (new_pid)
+        {
+          ply_trace ("Start monitoring process %d for fsck job '%s'", pid, status);
+          if (!start_monitor_fsck_pid (plugin, pid))
+            {
+              ply_trace ("Monitor failed, consider pid %d quit unexpectedly.", pid);
+              goto finish;
+            }
+
+          if (!n)
+            { /* A new fsck job */
+              n = calloc (1, sizeof (detailed_status_t));
+              n->status = strdup (status);
+              iter = ply_list_append_data (plugin->detailed_status, n);
+
+              ply_trace ("New fsck job: '%s'.", status);
+            }
+
+          /* See whether we can reuse an entry of uid == -1 */
+          for (i = 0; 
+               i < n->n_credentials &&
+               n->credentials[i].uid >= 0; i++) {}
+
+          if (i == n->n_credentials)
+            {
+              n->n_credentials++;
+              n->credentials = realloc (n->credentials,
+                                        n->n_credentials * sizeof (*n->credentials));
+              assert (n->credentials);
+            }
+
+          n->credentials[i].pid = pid;
+          n->credentials[i].uid = uid;
+
+          assert (iter);
+          ply_hashtable_insert (plugin->pid_map, (void *) (intptr_t) pid, iter);
+          ply_trace ("New process %d for fsck job '%s'.", pid, status);
+        }
+          
+      if (n->detail)
+        free (n->detail);
+      n->detail = strdup (detailed_status);
+    }
+
+  formatted_message = format_detailed_status (plugin);
+  display_message (plugin, formatted_message);
+  free (formatted_message);
+
+finish:
+  return;
+}
+
+static void
+on_fsck_abort (ply_boot_splash_plugin_t *plugin, int pid)
+{
+  ply_list_node_t *n;
+  detailed_status_t *s;
+  bool fsck_aborted;
+  int i;
+
+  if (!(n = ply_hashtable_remove (plugin->pid_map, (void *) (intptr_t) pid)))
+    return;
+
+  s = ply_list_node_get_data (n);
+
+  ply_trace ("Fsck job '%s': process %d exit unexpectedly.", s->status, pid);
+  stop_monitor_fsck_pid (plugin, pid);
+
+  for (i = 0, fsck_aborted = true; i < s->n_credentials; i++)
+    {
+      if (s->credentials[i].pid == pid)
+        {
+          /* hack: set uid to -1 to make this credential invaild */
+          s->credentials[i].uid = -1;
+          break;
+        }
+
+      if (s->credentials[i].uid >= 0)
+        fsck_aborted = false;
+    }
+
+  /* 
+   * fsck_aborted is still true, check it again: 
+   * Are there any pid exists for a fsck task? 
+   */
+  if (fsck_aborted)
+    {
+      for (i++; i < s->n_credentials; i++)
+        if (s->credentials[i].uid >= 0)
+          {
+            fsck_aborted = false;
+            break;
+          }
+    }
+
+  if (fsck_aborted)
+    {
+      char *formatted_message;
+
+      ply_trace ("Now consider fsck job '%s' finished.", s->status);
+
+      ply_list_remove_node (plugin->detailed_status, n);
+      detailed_status_free (s);
+
+      formatted_message = format_detailed_status (plugin);
+      display_message (plugin, formatted_message);
+      free (formatted_message);
+    }
+}
+
+static bool start_monitor_fsck_pid (ply_boot_splash_plugin_t *plugin,
+                                    int pid)
+{
+  bool r = true;
+
+  if (ply_proc_exit_notifier_get () < 0)
+    {
+      ply_error ("Failed to initialize process exit notifier");
+
+      r = false;
+      goto finish;
+    }
+
+  if (!ply_proc_exit_notifier_is_attched_event_loop ())
+    {
+      if (kill ((pid_t) pid, 0) < 0)
+        {
+          ply_trace ("Failed to send test signal to pid %d: %m", pid);
+
+          ply_proc_exit_notifier_put ();
+          r = false;
+          goto finish;
+        }
+
+      ply_trace ("Attach process exit notifier to event loop");
+      ply_proc_exit_notifier_attach_event_loop (plugin->loop);
+      ply_proc_exit_notifier_add_exit_cb ((ply_event_handler_t) on_fsck_abort,
+                                          plugin);
+    }
+
+finish:
+  return r;
+}
+
+static void stop_monitor_fsck_pid (ply_boot_splash_plugin_t *plugin,
+                                   int pid)
+{
+  ply_proc_exit_notifier_put ();
+  ply_trace ("Stop monitor fsck pid %d", pid);
+}
+
+static void stop_monitor_all_fsck_pids (ply_boot_splash_plugin_t *plugin)
+{
+  ply_proc_exit_notifier_reset ();
+  ply_trace ("Stop monitor all fsck pids.");
+}
+
 static void
 on_animation_stopped (ply_boot_splash_plugin_t *plugin)
 {
@@ -1259,8 +1617,9 @@ show_message (ply_boot_splash_plugin_t *plugin,
       next_node = ply_list_get_next_node (plugin->views, node);
       
       ply_label_set_text (view->message_label, message);
-      
-      ply_pixel_display_draw_area (view->display, 10, 10,
+
+      ply_pixel_display_draw_area (view->display,
+                                   10, 0.82 * ply_pixel_display_get_height (view->display),
                                    ply_label_get_width (view->message_label),
                                    ply_label_get_height(view->message_label));
       node = next_node;
@@ -1317,6 +1676,27 @@ display_message (ply_boot_splash_plugin_t *plugin,
   show_message (plugin, message);
 }
 
+static void kill_ (void *key, void *val, void *user_data)
+{
+  int pid = (int) (intptr_t) key;
+  if (kill (pid, SIGTERM) < 0)
+    ply_trace ("Failed to send SIGTERM to process %d: %m", pid);
+  else
+    ply_trace ("Send SIGTERM to process %d", pid);
+}
+
+static void
+on_key_stroke (ply_boot_splash_plugin_t   *plugin,
+               const char                 *keyboard_input)
+{
+  if (strstr (keyboard_input, plugin->cancel_key))
+    {
+      ply_hashtable_foreach (plugin->pid_map,
+                             kill_,
+                             NULL);
+    }
+}
+
 ply_boot_splash_plugin_interface_t *
 ply_boot_splash_plugin_get_interface (void)
 {
@@ -1328,10 +1708,12 @@ ply_boot_splash_plugin_get_interface (void)
       .remove_pixel_display = remove_pixel_display,
       .show_splash_screen = show_splash_screen,
       .update_status = update_status,
+      .update_status_detailed = update_status_detailed,
       .on_boot_progress = on_boot_progress,
       .hide_splash_screen = hide_splash_screen,
       .on_root_mounted = on_root_mounted,
       .become_idle = become_idle,
+      .on_key_stroke = on_key_stroke,
       .display_normal = display_normal,
       .display_password = display_password,
       .display_question = display_question,

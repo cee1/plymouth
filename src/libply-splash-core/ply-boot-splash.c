@@ -578,6 +578,25 @@ ply_boot_splash_update_status (ply_boot_splash_t *splash,
 }
 
 void
+ply_boot_splash_update_status_detailed (ply_boot_splash_t *splash,
+                                        const char        *status,
+                                        const char        *detailed_status,
+                                        int                pid,
+                                        int                uid)
+{
+  assert (splash != NULL);
+  assert (status != NULL);
+  assert (detailed_status != NULL);
+  assert (splash->plugin_interface != NULL);
+  assert (splash->plugin != NULL);
+  assert (splash->is_shown);
+
+  if (splash->plugin_interface->update_status_detailed != NULL)
+    splash->plugin_interface->update_status_detailed (splash->plugin,
+                                                      status, detailed_status, pid, uid);
+}
+
+void
 ply_boot_splash_update_output (ply_boot_splash_t *splash,
                                const char        *output,
                                size_t             size)
@@ -749,6 +768,19 @@ ply_boot_splash_become_idle (ply_boot_splash_t                  *splash,
                            splash);
 
   splash->plugin_interface->become_idle (splash->plugin, splash->idle_trigger);
+}
+
+void
+ply_boot_splash_on_key_stroke (ply_boot_splash_t  *splash,
+                               const char         *keyboard_input)
+{
+  assert (splash != NULL);
+  assert (keyboard_input != NULL && keyboard_input[0] != '\0');
+
+  if (splash->plugin_interface->on_key_stroke)
+    return splash->plugin_interface->on_key_stroke (splash->plugin, keyboard_input); 
+
+  return;
 }
 
 #ifdef PLY_BOOT_SPLASH_ENABLE_TEST

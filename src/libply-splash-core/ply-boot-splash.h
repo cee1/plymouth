@@ -65,6 +65,12 @@ bool ply_boot_splash_show (ply_boot_splash_t *splash,
                            ply_boot_splash_mode_t mode);
 void ply_boot_splash_update_status (ply_boot_splash_t *splash,
                                     const char        *status);
+void ply_boot_splash_update_status_detailed (ply_boot_splash_t *splash,
+                                             const char        *status,
+                                             const char        *detailed_status,
+                                             int                pid,
+                                             int                uid);
+
 void ply_boot_splash_update_output (ply_boot_splash_t *splash,
                                     const char        *output,
                                     size_t             size);
@@ -88,7 +94,8 @@ void ply_boot_splash_attach_progress (ply_boot_splash_t *splash,
 void ply_boot_splash_become_idle (ply_boot_splash_t                 *splash,
                                   ply_boot_splash_on_idle_handler_t  idle_handler,
                                   void                              *user_data);
-
+void ply_boot_splash_on_key_stroke (ply_boot_splash_t  *splash,
+                                    const char         *keyboard_input);
 
 #endif
 

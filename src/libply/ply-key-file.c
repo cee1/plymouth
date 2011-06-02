@@ -364,6 +364,50 @@ ply_key_file_get_value (ply_key_file_t *key_file,
   return strdup (entry->value);
 }
 
+char *
+ply_key_file_get_value_locale (ply_key_file_t *key_file,
+                               const char     *group_name,
+                               const char     *key,
+                               const char     *locale)
+{
+  char candidate_key[128], *translated_value = NULL;
+  char **languages;
+  bool free_languages = false;
+  int i;
+
+  if (locale)
+    {
+      languages = ply_get_locale_variants (locale);
+      free_languages = true;
+    }
+  else
+    {
+      languages = (char **) ply_get_language_names ();
+      free_languages = false;
+    }
+  
+  for (i = 0; languages[i]; i++)
+    {
+      snprintf (candidate_key, 128, "%s[%s]", key, languages[i]);
+
+      translated_value = ply_key_file_get_value (key_file,
+                                                 group_name,
+                                                 candidate_key);
+      if (translated_value)
+        break;
+   }
+
+  /* Fallback to untranslated key
+   */
+  if (!translated_value)
+    translated_value = ply_key_file_get_value (key_file, group_name, key);
+
+  if (free_languages)
+    ply_free_string_array (languages);
+
+  return translated_value;
+}
+
 static void
 ply_key_file_foreach_entry_entries (void *key,
                                     void *data,

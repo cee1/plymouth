@@ -281,6 +281,21 @@ ply_hashtable_foreach (ply_hashtable_t              *hashtable,
     }
 }
 
+unsigned int
+ply_hashtable_size (ply_hashtable_t *hashtable)
+{
+  unsigned int i;
+  unsigned int cnt = 0;
+
+  for (i = 0; i < hashtable->total_node_count; i++)
+    {
+      if (ply_bitarray_lookup (hashtable->live_node_bitmap, i))
+        cnt++;
+    }
+
+  return cnt;
+}
+
 
 #ifdef PLY_HASHTABLE_ENABLE_TEST
 #include <stdio.h>

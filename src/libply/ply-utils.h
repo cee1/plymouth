@@ -117,8 +117,18 @@ int ply_utf8_character_get_size (const char   *string,
 int ply_utf8_string_get_length (const char   *string,
                                 size_t        n);
 
-char *ply_get_process_command_line (pid_t pid);
-pid_t ply_get_process_parent_pid (pid_t pid);
+/* removes leading spaces */
+char* ply_strchug (char *string);
+/* removes trailing spaces */
+char* ply_strchomp (char *string);
+/* removes leading & trailing spaces */
+#define ply_strstrip( string ) ply_strchomp (ply_strchug (string))
+
+char **
+ply_get_locale_variants (const char *locale);
+
+const char * const * 
+ply_get_language_names (void);
 
 #endif
 

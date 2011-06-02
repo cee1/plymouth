@@ -32,6 +32,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 #include <sys/klog.h>
 #include <sys/mount.h>
@@ -50,6 +51,7 @@
 #include <dlfcn.h>
 
 #include "ply-logger.h"
+#include "ply-hashtable.h"
 
 #ifndef PLY_OPEN_FILE_DESCRIPTORS_DIR
 #define PLY_OPEN_FILE_DESCRIPTORS_DIR "/proc/self/fd"
@@ -69,10 +71,6 @@
 
 #ifndef PLY_ENABLE_CONSOLE_PRINTK
 #define PLY_ENABLE_CONSOLE_PRINTK 7
-#endif
-
-#ifndef PLY_MAX_COMMAND_LINE_SIZE
-#define PLY_MAX_COMMAND_LINE_SIZE 4096
 #endif
 
 static int errno_stack[PLY_ERRNO_STACK_SIZE];
@@ -949,91 +947,336 @@ ply_utf8_string_get_length (const char   *string,
   return count;
 }
 
-char *
-ply_get_process_command_line (pid_t pid)
+char*
+ply_strchug (char *string)
 {
-  char *path;
-  char *command_line;
-  ssize_t bytes_read;
-  int fd;
-  ssize_t i;
+  unsigned char *start;
 
-  path = NULL;
-  command_line = NULL;
+  if (!string)
+    return NULL;
 
-  asprintf (&path, "/proc/%ld/cmdline", (long) pid);
+  for (start = (unsigned char*) string; *start && isspace (*start); start++)
+    ;
 
-  fd = open (path, O_RDONLY);
+  memmove (string, start, strlen ((char *) start) + 1);
 
-  if (fd < 0)
+  return string;
+}
+
+char*
+ply_strchomp (char *string)
+{
+  size_t len;
+
+  if (!string)
+    return NULL;
+
+  len = strlen (string);
+  while (len--)
     {
-      ply_trace ("Could not open %s: %m", path);
-      goto error;
+      if (isspace ((unsigned char) string[len]))
+        string[len] = '\0';
+      else
+        break;
     }
 
-  command_line = calloc (PLY_MAX_COMMAND_LINE_SIZE, sizeof (char));
-  bytes_read = read (fd, command_line, PLY_MAX_COMMAND_LINE_SIZE - 1);
-  if (bytes_read < 0)
+  return string;
+}
+
+
+/* Mask for components of locale spec. The ordering here is from
+ * least significant to most significant
+ */
+enum
+{
+  COMPONENT_CODESET =   1 << 0,
+  COMPONENT_TERRITORY = 1 << 1,
+  COMPONENT_MODIFIER =  1 << 2
+};
+
+/* Break an X/Open style locale specification into components
+ */
+static unsigned int
+explode_locale (const char *locale,
+        char      **language, 
+        char      **territory, 
+        char      **codeset, 
+        char      **modifier)
+{
+  const char *uscore_pos;
+  const char *at_pos;
+  const char *dot_pos;
+
+  unsigned int mask = 0;
+
+  uscore_pos = strchr (locale, '_');
+  dot_pos = strchr (uscore_pos ? uscore_pos : locale, '.');
+  at_pos = strchr (dot_pos ? dot_pos : (uscore_pos ? uscore_pos : locale), '@');
+
+  if (at_pos)
     {
-      ply_trace ("Could not read %s: %m", path);
-      close (fd);
-      goto error;
+      mask |= COMPONENT_MODIFIER;
+      *modifier = strdup (at_pos);
     }
-  close (fd);
-  free (path);
+  else
+    at_pos = locale + strlen (locale);
 
-  for (i = 0; i < bytes_read - 1; i++)
+  if (dot_pos)
     {
-      if (command_line[i] == '\0')
-        command_line[i] = ' ';
+      mask |= COMPONENT_CODESET;
+      *codeset = strndup (dot_pos, at_pos - dot_pos);
     }
-  command_line[i] = '\0';
+  else
+    dot_pos = at_pos;
 
-  return command_line;
+  if (uscore_pos)
+    {
+      mask |= COMPONENT_TERRITORY;
+      *territory = strndup (uscore_pos, dot_pos - uscore_pos);
+    }
+  else
+    uscore_pos = dot_pos;
 
-error:
-  free (path);
-  free (command_line);
+  *language = strndup (locale, uscore_pos - locale);
+
+  return mask;
+}
+
+static void
+append_locale_variants (char        **array,
+                        unsigned int *len,
+                        const char   *locale)
+{
+  char *language = NULL;
+  char *territory = NULL;
+  char *codeset = NULL;
+  char *modifier = NULL;
+
+  unsigned int mask;
+  unsigned int i, j, k;
+
+  mask = explode_locale (locale, &language, &territory, &codeset, &modifier);
+
+  /* Iterate through all possible combinations, from least attractive
+   * to most attractive.
+   */
+  for (j = 0, k = 0; j <= mask; ++j)
+    {
+      i = mask - j;
+
+      if ((i & ~mask) == 0)
+        {
+          char *val;
+          int q = asprintf (&val, "%s%s%s%s", language,
+                            (i & COMPONENT_TERRITORY) ? territory : "",
+                            (i & COMPONENT_CODESET) ? codeset : "",
+                            (i & COMPONENT_MODIFIER) ? modifier : "");
+          assert (q != -1);
+          assert (k < *len); /* blame if array is not large enough */
+          array[k++] = val;
+        }
+    }
+  *len = k;
+
+  free (language);
+  if (mask & COMPONENT_CODESET)
+    free (codeset);
+  if (mask & COMPONENT_TERRITORY)
+    free (territory);
+  if (mask & COMPONENT_MODIFIER)
+    free (modifier);
+}
+
+char **
+ply_get_locale_variants (const char *locale)
+{
+  unsigned int len, _len = \
+    8;/* COMPONENT_CODESET|COMPONENT_TERRITORY|COMPONENT_MODIFIER + 1(NULL terminated) */
+  char **array = malloc(_len * sizeof (char *));
+
+  if (locale == NULL)
+    return NULL;
+
+  len = _len;
+  append_locale_variants (array, &len, locale);
+
+  assert (len < _len);
+  array[len] = NULL; /* NULL terminated */
+
+  return array;
+}
+
+
+static const char *
+guess_category_value (const char *category_name)
+{
+  const char *retval;
+
+  /* The highest priority value is the `LANGUAGE' environment
+     variable.  This is a GNU extension.  */
+  retval = getenv ("LANGUAGE");
+  if ((retval != NULL) && (retval[0] != '\0'))
+    return retval;
+
+  /* `LANGUAGE' is not set.  So we have to proceed with the POSIX
+     methods of looking to `LC_ALL', `LC_xxx', and `LANG'.  On some
+     systems this can be done by the `setlocale' function itself.  */
+
+  /* Setting of LC_ALL overwrites all other.  */
+  retval = getenv ("LC_ALL");  
+  if ((retval != NULL) && (retval[0] != '\0'))
+    return retval;
+
+  /* Next comes the name of the desired category.  */
+  retval = getenv (category_name);
+  if ((retval != NULL) && (retval[0] != '\0'))
+    return retval;
+
+  /* Last possibility is the LANG environment variable.  */
+  retval = getenv ("LANG");
+  if ((retval != NULL) && (retval[0] != '\0'))
+    return retval;
+
   return NULL;
 }
 
-pid_t
-ply_get_process_parent_pid (pid_t pid)
+static ply_hashtable_t *alias_table = NULL;
+
+/* read an alias file for the locales */
+static void
+read_aliases (const char *file)
 {
-  char *path;
   FILE *fp;
-  int ppid;
+  char buf[256];
+  
+  if (!alias_table)
+    alias_table = ply_hashtable_new (ply_hashtable_string_hash,
+                                     ply_hashtable_string_compare);
+  fp = fopen (file, "r");
+  if (!fp)
+    return;
 
-  asprintf (&path, "/proc/%ld/stat", (long) pid);
-
-  ppid = 0;
-  fp = fopen (path, "r");
-
-  if (fp == NULL)
+  while (fgets (buf, 256, fp))
     {
-      ply_trace ("Could not open %s: %m", path);
-      goto out;
+      char *p, *q;
+
+      ply_strstrip (buf);
+
+      /* Line is a comment */
+      if ((buf[0] == '#') || (buf[0] == '\0'))
+        continue;
+
+      /* Reads first column */
+      for (p = buf, q = NULL; *p; p++)
+        {
+          if ((*p == '\t') || (*p == ' ') || (*p == ':'))
+            {
+              *p = '\0';
+              q = p+1;
+
+              while ((*q == '\t') || (*q == ' '))
+                q++;
+              break;
+            }
+        }
+
+      /* The line only had one column */
+      if (!q || *q == '\0')
+        continue;
+      
+      /* Read second column */
+      for (p = q; *p; p++)
+        {
+          if ((*p == '\t') || (*p == ' '))
+            {
+              *p = '\0';
+              break;
+            }
+        }
+
+      /* Add to alias table if necessary */
+      if (!ply_hashtable_lookup (alias_table, buf))
+        {
+          ply_hashtable_insert (alias_table, strdup (buf), strdup (q));
+        }
     }
 
-  if (fscanf (fp, "%*d %*s %*c %d", &ppid) != 1)
+  fclose (fp);
+}
+
+static char *
+unalias_lang (char *lang)
+{
+  char *p;
+  int i;
+
+  if (!alias_table)
+    read_aliases ("/usr/share/locale/locale.alias");
+
+  i = 0;
+  while ((p = ply_hashtable_lookup (alias_table, lang)) && (strcmp (p, lang) != 0))
     {
-      ply_trace ("Could not parse %s: %m", path);
-      goto out;
+      lang = p;
+      if (i++ == 30)
+        {
+          static bool said_before = false;
+      if (!said_before)
+            ply_trace ("Too many alias levels for a locale, "
+               "may indicate a loop");
+      said_before = true;
+      return lang;
     }
+    }
+  return lang;
+}
 
-  if (ppid <= 0)
+const char * const * 
+ply_get_language_names (void)
+{
+  static const char * const * language_names = NULL;
+
+  if (!language_names)
     {
-      ply_trace ("%s is returning invalid parent pid %d", path, ppid);
-      ppid = 0;
-      goto out;
+      /* once */
+      const char *value;
+      char *dup, *l, *cxt = NULL;
+      char **buf = NULL;
+      unsigned int buf_len = 0, offset = 0;
+      value = guess_category_value ("LC_MESSAGES");
+
+      if (!value)
+        value = "C";
+
+      dup = strdup (value); 
+      for (l = strtok_r (dup, ":", &cxt); l; l = strtok_r (NULL, ":", &cxt))
+        {
+          unsigned int len = 7;/* COMPONENT_CODESET|COMPONENT_TERRITORY|COMPONENT_MODIFIER */
+          char *array[len];
+
+          append_locale_variants (array, &len, unalias_lang (l));
+          if (len + 2 > buf_len - offset) 
+            {
+              unsigned int more = len + 2 > buf_len ? len + 2 : buf_len;
+
+              buf_len += more; 
+
+              buf = realloc (buf, buf_len * sizeof (char *));
+              assert (buf);
+            }
+
+          /* After copy array, we have at least 2 empty entries,
+           * that is used for 1)fallback 'C' locale + 2) NULL terminated*/
+          memcpy (buf + offset, array, len * sizeof (char *));
+          offset += len;
+        }
+      buf[offset++] = strdup("C");
+      buf[offset] = NULL;
+
+      free(dup);
+
+      language_names = (const char * const *) buf;
     }
-
-out:
-  free (path);
-
-  if (fp != NULL)
-    fclose (fp);
-
-  return (pid_t) ppid;
+  
+  return language_names;
 }
 /* vim: set ts=4 sw=4 expandtab autoindent cindent cino={.5s,(0: */

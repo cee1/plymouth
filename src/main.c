@@ -170,14 +170,32 @@ on_session_hangup (state_t *state)
 
 static void
 on_update (state_t     *state,
-           const char  *status)
+           const char  *status,
+           const char  *detailed_status,
+           int         pid,
+           int         uid)
 {
-  ply_trace ("updating status to '%s'", status);
-  ply_progress_status_update (state->progress,
-                               status);
+  if (!detailed_status)
+    {
+      ply_trace ("updating status to '%s'", status);
+      ply_progress_status_update (state->progress,
+                                  status);
+    }
+  else
+      ply_trace ("updating detailed status of '%s'", status);
+
   if (state->boot_splash != NULL)
-    ply_boot_splash_update_status (state->boot_splash,
-                                   status);
+    {
+      if (!detailed_status)
+        ply_boot_splash_update_status (state->boot_splash,
+                                       status);
+      else
+        ply_boot_splash_update_status_detailed (state->boot_splash,
+                                                status,
+                                                detailed_status,
+                                                pid,
+                                                uid);
+    }
 }
 
 static void
@@ -1285,6 +1303,9 @@ on_keyboard_input (state_t                  *state,
     }
   else
     {
+      if (state->boot_splash)
+        ply_boot_splash_on_key_stroke (state->boot_splash, keyboard_input);
+
       for (node = ply_list_get_first_node (state->keystroke_triggers); node;
                         node = ply_list_get_next_node (state->keystroke_triggers, node))
         {

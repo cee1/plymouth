@@ -67,6 +67,11 @@ typedef struct
                                ply_boot_splash_mode_t    mode);
   void (* update_status) (ply_boot_splash_plugin_t *plugin,
                           const char               *status);
+  void (* update_status_detailed) (ply_boot_splash_plugin_t *plugin,
+                                   const char               *status,
+                                   const char               *detailed_status,
+                                   int                       pid,
+                                   int                       uid);
   void (* on_boot_output) (ply_boot_splash_plugin_t *plugin,
                            const char               *output,
                            size_t                    size);
@@ -89,6 +94,8 @@ typedef struct
                              const char               *entry_text);
   void (* become_idle) (ply_boot_splash_plugin_t       *plugin,
                         ply_trigger_t                  *idle_trigger);
+  void (* on_key_stroke) (ply_boot_splash_plugin_t     *plugin,
+                          const char                   *keyboard_input);
 } ply_boot_splash_plugin_interface_t;
 
 #endif /* PLY_BOOT_SPLASH_PLUGIN_H */

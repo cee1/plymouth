@@ -26,7 +26,8 @@ libply_HEADERS = \
 		    ply-region.h                                              \
 		    ply-terminal-session.h                                    \
 		    ply-trigger.h                                             \
-		    ply-utils.h
+		    ply-utils.h                                               \
+		    ply-proc.h
 
 libply_la_CFLAGS = $(PLYMOUTH_CFLAGS)
 libply_la_LIBADD = $(PLYMOUTH_LIBS)
@@ -48,6 +49,7 @@ libply_la_SOURCES = ply-event-loop.c                                          \
 		    ply-region.c                                              \
 		    ply-terminal-session.c                                    \
 		    ply-trigger.c                                             \
-		    ply-utils.c
+		    ply-utils.c                                               \
+		    ply-proc.c
 
 MAINTAINERCLEANFILES = Makefile.in

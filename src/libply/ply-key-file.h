@@ -42,6 +42,10 @@ bool ply_key_file_has_key (ply_key_file_t *key_file,
 char *ply_key_file_get_value (ply_key_file_t *key_file,
                               const char     *group_name,
                               const char     *key);
+char *ply_key_file_get_value_locale (ply_key_file_t *key_file,
+                                     const char     *group_name,
+                                     const char     *key,
+                                     const char     *locale);
 void ply_key_file_foreach_entry (ply_key_file_t              *key_file,
                                  ply_key_file_foreach_func_t  func,
                                  void                        *user_data);
