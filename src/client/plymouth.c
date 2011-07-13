@@ -299,7 +299,8 @@ on_password_answer (password_answer_state_t   *answer_state,
                                                        (WEXITSTATUS (exit_status) ? on_failure : on_success),
                                                        (ply_boot_client_response_handler_t)
                                                        on_failure,
-                                                       answer_state->state);
+                                                       answer_state->state,
+                                                       false);
     }
   else
     ply_event_loop_exit (answer_state->state->loop, WEXITSTATUS (exit_status));
@@ -333,7 +334,8 @@ on_question_answer (question_answer_state_t   *answer_state,
                                                          on_success,
                                                          (ply_boot_client_response_handler_t)
                                                          on_failure,
-                                                         answer_state->state);
+                                                         answer_state->state,
+                                                         false);
       else
         ply_event_loop_exit (answer_state->state->loop, 0);
     }
@@ -345,7 +347,8 @@ on_question_answer (question_answer_state_t   *answer_state,
                                                          on_failure,
                                                          (ply_boot_client_response_handler_t)
                                                          on_failure,
-                                                         answer_state->state);
+                                                         answer_state->state,
+                                                         false);
       else
         ply_event_loop_exit (answer_state->state->loop, 1);
     }
@@ -520,7 +523,8 @@ on_password_request (state_t    *state,
                                                      on_password_request_execute,
                                                      (ply_boot_client_response_handler_t)
                                                      on_password_answer_failure,
-                                                     password_answer_state);
+                                                     password_answer_state,
+                                                     false);
     }
   else
     {
@@ -574,7 +578,8 @@ on_question_request (state_t    *state,
                                                      on_question_request_execute,
                                                      (ply_boot_client_response_handler_t)
                                                      on_question_answer_failure,
-                                                     question_answer_state);
+                                                     question_answer_state,
+                                                     false);
     }
   else
     {
@@ -587,11 +592,13 @@ on_display_message_request (state_t    *state,
                             const char *command)
 {
   char *text;
+  bool  ignore_replies = false;
 
   text = NULL;
   ply_command_parser_get_command_options (state->command_parser,
                                           command,
                                           "text", &text,
+                                          "ignore-replies", &ignore_replies,
                                           NULL);
   if (text != NULL)
     {
@@ -600,7 +607,7 @@ on_display_message_request (state_t    *state,
                                                       (ply_boot_client_response_handler_t)
                                                       on_success,
                                                       (ply_boot_client_response_handler_t)
-                                                      on_failure, state);
+                                                      on_failure, state, ignore_replies);
       free (text);
     }
 }
@@ -610,11 +617,13 @@ on_hide_message_request (state_t    *state,
                          const char *command)
 {
   char *text;
+  bool  ignore_replies = false;
 
   text = NULL;
   ply_command_parser_get_command_options (state->command_parser,
                                           command,
                                           "text", &text,
+                                          "ignore-replies", &ignore_replies,
                                           NULL);
   if (text != NULL)
     {
@@ -623,7 +632,7 @@ on_hide_message_request (state_t    *state,
                                                    (ply_boot_client_response_handler_t)
                                                    on_success,
                                                    (ply_boot_client_response_handler_t)
-                                                   on_failure, state);
+                                                   on_failure, state, ignore_replies);
       free (text);
     }
 }
@@ -662,12 +671,14 @@ on_keystroke_ignore (state_t    *state,
                      const char *command)
 {
   char *keys;
+  bool  ignore_replies = false;
 
   keys = NULL;
   
   ply_command_parser_get_command_options (state->command_parser,
                                           command,
                                           "keys", &keys,
+                                          "ignore-replies", &ignore_replies,
                                           NULL);
 
   ply_boot_client_ask_daemon_to_ignore_keystroke (state->client,
@@ -675,18 +686,25 @@ on_keystroke_ignore (state_t    *state,
                                                   (ply_boot_client_answer_handler_t)
                                                   on_success,
                                                   (ply_boot_client_response_handler_t)
-                                                  on_failure, state);
+                                                  on_failure, state, ignore_replies);
 }
 
 static void
 on_progress_pause_request (state_t    *state,
                            const char *command)
 {
+  bool ignore_replies = false;
+
+  ply_command_parser_get_command_options (state->command_parser,
+                                          command,
+                                          "ignore-replies", &ignore_replies,
+                                          NULL);
+
   ply_boot_client_tell_daemon_to_progress_pause (state->client,
                                                 (ply_boot_client_response_handler_t)
                                                 on_success,
                                                 (ply_boot_client_response_handler_t)
-                                                on_failure, state);
+                                                on_failure, state, ignore_replies);
 }
 
 
@@ -694,22 +712,36 @@ static void
 on_progress_unpause_request (state_t    *state,
                              const char *command)
 {
+  bool ignore_replies = false;
+
+  ply_command_parser_get_command_options (state->command_parser,
+                                          command,
+                                          "ignore-replies", &ignore_replies,
+                                          NULL);
+
   ply_boot_client_tell_daemon_to_progress_unpause (state->client,
                                                   (ply_boot_client_response_handler_t)
                                                   on_success,
                                                   (ply_boot_client_response_handler_t)
-                                                  on_failure, state);
+                                                  on_failure, state, ignore_replies);
 }
 
 static void
 on_report_error_request (state_t    *state,
                          const char *command)
 {
+  bool ignore_replies = false;
+
+  ply_command_parser_get_command_options (state->command_parser,
+                                          command,
+                                          "ignore-replies", &ignore_replies,
+                                          NULL);
+
   ply_boot_client_tell_daemon_about_error (state->client,
                                            (ply_boot_client_response_handler_t)
                                            on_success,
                                            (ply_boot_client_response_handler_t)
-                                           on_failure, state);
+                                           on_failure, state, ignore_replies);
 
 }
 
@@ -717,34 +749,49 @@ static void
 on_deactivate_request (state_t    *state,
                        const char *command)
 {
+  bool ignore_replies = false;
+
+  ply_command_parser_get_command_options (state->command_parser,
+                                          command,
+                                          "ignore-replies", &ignore_replies,
+                                          NULL);
+
   ply_boot_client_tell_daemon_to_deactivate (state->client,
                                              (ply_boot_client_response_handler_t)
                                              on_success,
                                              (ply_boot_client_response_handler_t)
-                                             on_failure, state);
+                                             on_failure, state, ignore_replies);
 }
 
 static void
 on_reactivate_request (state_t    *state,
                        const char *command)
 {
+  bool ignore_replies = false;
+
+  ply_command_parser_get_command_options (state->command_parser,
+                                          command,
+                                          "ignore-replies", &ignore_replies,
+                                          NULL);
+
   ply_boot_client_tell_daemon_to_reactivate (state->client,
                                              (ply_boot_client_response_handler_t)
                                              on_success,
                                              (ply_boot_client_response_handler_t)
-                                             on_failure, state);
+                                             on_failure, state, ignore_replies);
 }
 
 static void
 on_quit_request (state_t    *state,
                  const char *command)
 {
-  bool should_retain_splash;
+  bool should_retain_splash = false;
+  bool ignore_replies = false;
 
-  should_retain_splash = false;
   ply_command_parser_get_command_options (state->command_parser,
                                           command,
                                           "retain-splash", &should_retain_splash,
+                                          "ignore-replies", &ignore_replies,
                                           NULL);
 
   ply_boot_client_tell_daemon_to_quit (state->client,
@@ -752,7 +799,8 @@ on_quit_request (state_t    *state,
                                        (ply_boot_client_response_handler_t)
                                        on_success,
                                        (ply_boot_client_response_handler_t)
-                                       on_failure, state);
+                                       on_failure, state,
+                                       ignore_replies);
 }
 
 static bool
@@ -788,6 +836,7 @@ on_update_root_fs_request (state_t    *state,
 
   char *root_dir;
   bool is_read_write;
+  bool ignore_replies = false;
 
   root_dir = NULL;
   is_read_write = false;
@@ -795,6 +844,7 @@ on_update_root_fs_request (state_t    *state,
                                           command,
                                           "new-root-dir", &root_dir,
                                           "read-write", &is_read_write,
+                                          "ignore-replies", &ignore_replies,
                                           NULL);
 
   if (root_dir != NULL)
@@ -803,7 +853,7 @@ on_update_root_fs_request (state_t    *state,
                                                   (ply_boot_client_response_handler_t)
                                                   on_success,
                                                   (ply_boot_client_response_handler_t)
-                                                  on_failure, state);
+                                                  on_failure, state, ignore_replies);
 
     }
 
@@ -813,7 +863,7 @@ on_update_root_fs_request (state_t    *state,
                                                          (ply_boot_client_response_handler_t)
                                                          on_success,
                                                          (ply_boot_client_response_handler_t)
-                                                         on_failure, state);
+                                                         on_failure, state, ignore_replies);
     }
 }
 
@@ -821,22 +871,36 @@ static void
 on_show_splash_request (state_t    *state,
                         const char *command)
 {
-    ply_boot_client_tell_daemon_to_show_splash (state->client,
-                                               (ply_boot_client_response_handler_t)
-                                               on_success,
-                                               (ply_boot_client_response_handler_t)
-                                               on_failure, state);
+  bool ignore_replies = false;
+
+  ply_command_parser_get_command_options (state->command_parser,
+                                          command,
+                                          "ignore-replies", &ignore_replies,
+                                          NULL);
+
+  ply_boot_client_tell_daemon_to_show_splash (state->client,
+                                              (ply_boot_client_response_handler_t)
+                                              on_success,
+                                              (ply_boot_client_response_handler_t)
+                                              on_failure, state, ignore_replies);
 }
 
 static void
 on_hide_splash_request (state_t    *state,
                         const char *command)
 {
-    ply_boot_client_tell_daemon_to_hide_splash (state->client,
-                                               (ply_boot_client_response_handler_t)
-                                               on_success,
-                                               (ply_boot_client_response_handler_t)
-                                               on_failure, state);
+  bool ignore_replies = false;
+
+  ply_command_parser_get_command_options (state->command_parser,
+                                          command,
+                                          "ignore-replies", &ignore_replies,
+                                          NULL);
+
+  ply_boot_client_tell_daemon_to_hide_splash (state->client,
+                                              (ply_boot_client_response_handler_t)
+                                              on_success,
+                                              (ply_boot_client_response_handler_t)
+                                              on_failure, state, ignore_replies);
 }
 
 static void
@@ -844,11 +908,13 @@ on_update_request (state_t    *state,
                    const char *command)
 {
   char *status;
+  bool  ignore_replies = false;
 
   status = NULL;
   ply_command_parser_get_command_options (state->command_parser,
                                           command,
                                           "status", &status,
+                                          "ignore-replies", &ignore_replies,
                                           NULL);
 
   if (status != NULL)
@@ -857,7 +923,7 @@ on_update_request (state_t    *state,
                                      (ply_boot_client_response_handler_t)
                                      on_success,
                                      (ply_boot_client_response_handler_t)
-                                     on_failure, state);
+                                     on_failure, state, ignore_replies);
 
     }
 }
@@ -904,6 +970,8 @@ main (int    argc,
                                   on_update_request, &state,
                                   "status", "Tell daemon the current boot status",
                                   PLY_COMMAND_OPTION_TYPE_STRING,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
                                   NULL);
 
   ply_command_parser_add_command (state.command_parser,
@@ -914,18 +982,24 @@ main (int    argc,
                                   PLY_COMMAND_OPTION_TYPE_STRING,
                                   "read-write", "Root filesystem is no longer read-only",
                                   PLY_COMMAND_OPTION_TYPE_FLAG,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
                                   NULL);
 
   ply_command_parser_add_command (state.command_parser,
                                   "show-splash", "Tell daemon to show splash screen",
                                   (ply_command_handler_t)
                                   on_show_splash_request, &state,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
                                   NULL);
 
   ply_command_parser_add_command (state.command_parser,
                                   "hide-splash", "Tell daemon to hide splash screen",
                                   (ply_command_handler_t)
                                   on_hide_splash_request, &state,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
                                   NULL);
 
   ply_command_parser_add_command (state.command_parser,
@@ -960,6 +1034,8 @@ main (int    argc,
                                   on_display_message_request, &state,
                                   "text", "The message text",
                                   PLY_COMMAND_OPTION_TYPE_STRING,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
                                   NULL);
   ply_command_parser_add_command_alias (state.command_parser,
                                         "display-message",
@@ -970,6 +1046,8 @@ main (int    argc,
                                   on_hide_message_request, &state,
                                   "text", "The message text",
                                   PLY_COMMAND_OPTION_TYPE_STRING,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
                                   NULL);
 
   ply_command_parser_add_command (state.command_parser,
@@ -988,42 +1066,59 @@ main (int    argc,
                                   on_keystroke_ignore, &state,
                                   "keys", "Keys to remove sensitivity to",
                                   PLY_COMMAND_OPTION_TYPE_STRING,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
                                   NULL);
 
   ply_command_parser_add_command (state.command_parser,
                                   "pause-progress", "Pause boot progress bar",
                                   (ply_command_handler_t)
                                   on_progress_pause_request, &state,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
                                   NULL);
 
   ply_command_parser_add_command (state.command_parser,
                                   "unpause-progress", "Unpause boot progress bar",
                                   (ply_command_handler_t)
                                   on_progress_unpause_request, &state,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
                                   NULL);
 
   ply_command_parser_add_command (state.command_parser,
                                   "report-error", "Tell boot daemon there were errors during boot",
                                   (ply_command_handler_t)
                                   on_report_error_request, &state,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
                                   NULL);
 
   ply_command_parser_add_command (state.command_parser,
                                   "deactivate", "Tell boot daemon to deactivate",
                                   (ply_command_handler_t)
-                                  on_deactivate_request, &state, NULL);
+                                  on_deactivate_request, &state,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
+                                  NULL);
 
   ply_command_parser_add_command (state.command_parser,
                                   "reactivate", "Tell boot daemon to reactivate",
                                   (ply_command_handler_t)
-                                  on_reactivate_request, &state, NULL);
+                                  on_reactivate_request, &state,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
+                                  NULL);
 
   ply_command_parser_add_command (state.command_parser,
                                   "quit", "Tell boot daemon to quit",
                                   (ply_command_handler_t)
                                   on_quit_request, &state,
                                   "retain-splash", "Don't explicitly hide boot splash on exit",
-                                  PLY_COMMAND_OPTION_TYPE_FLAG, NULL);
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
+                                  "ignore-replies", "Ignore replies from boot daemon, not wait for them",
+                                  PLY_COMMAND_OPTION_TYPE_FLAG,
+                                  NULL);
 
   if (!ply_command_parser_parse_arguments (state.command_parser, state.loop, argv, argc))
     {
@@ -1117,20 +1212,20 @@ main (int    argc,
                                                (ply_boot_client_response_handler_t)
                                                on_success,
                                                (ply_boot_client_response_handler_t)
-                                               on_failure, &state);
+                                               on_failure, &state, false);
   else if (should_hide_splash)
     ply_boot_client_tell_daemon_to_hide_splash (state.client,
                                                (ply_boot_client_response_handler_t)
                                                on_success,
                                                (ply_boot_client_response_handler_t)
-                                               on_failure, &state);
+                                               on_failure, &state, false);
   else if (should_quit)
     ply_boot_client_tell_daemon_to_quit (state.client,
                                          false,
                                          (ply_boot_client_response_handler_t)
                                          on_success,
                                          (ply_boot_client_response_handler_t)
-                                         on_failure, &state);
+                                         on_failure, &state, false);
   else if (should_ping)
     ply_boot_client_ping_daemon (state.client,
                                  (ply_boot_client_response_handler_t)
@@ -1142,13 +1237,13 @@ main (int    argc,
                                               (ply_boot_client_response_handler_t)
                                               on_success,
                                               (ply_boot_client_response_handler_t)
-                                              on_failure, &state);
+                                              on_failure, &state, false);
   else if (status != NULL)
     ply_boot_client_update_daemon (state.client, status,
                                    (ply_boot_client_response_handler_t)
                                    on_success, 
                                    (ply_boot_client_response_handler_t)
-                                   on_failure, &state);
+                                   on_failure, &state, false);
   else if (should_ask_for_password)
     {
       password_answer_state_t answer_state = { 0 };
@@ -1169,20 +1264,20 @@ main (int    argc,
                                            (ply_boot_client_answer_handler_t)
                                            on_success,
                                            (ply_boot_client_response_handler_t)
-                                           on_failure, &state);
+                                           on_failure, &state, false);
     }
   else if (should_sysinit)
     ply_boot_client_tell_daemon_system_is_initialized (state.client,
                                    (ply_boot_client_response_handler_t)
                                    on_success, 
                                    (ply_boot_client_response_handler_t)
-                                   on_failure, &state);
+                                   on_failure, &state, false);
   else if (chroot_dir)
     ply_boot_client_tell_daemon_to_change_root (state.client, chroot_dir,
                                    (ply_boot_client_response_handler_t)
                                    on_success,
                                    (ply_boot_client_response_handler_t)
-                                   on_failure, &state);
+                                   on_failure, &state, false);
 
   else if (should_wait)
     {} // Do nothing
@@ -1191,7 +1286,7 @@ main (int    argc,
                                              (ply_boot_client_response_handler_t)
                                              on_success,
                                              (ply_boot_client_response_handler_t)
-                                             on_failure, &state);
+                                             on_failure, &state, false);
 
   exit_code = ply_event_loop_run (state.loop);
 
