@@ -114,11 +114,11 @@ typedef struct
   uint32_t is_inactive : 1;
   uint32_t should_force_details : 1;
 
-  char *kernel_console_tty;
+  char *volatile kernel_console_tty; /* access by on_crash handler */
   char *override_splash_path;
   char *system_default_splash_path;
   char *distribution_default_splash_path;
-  const char *default_tty;
+  const char *volatile default_tty; /* access by on_crash handler */
 
   int number_of_errors;
 } state_t;
@@ -1464,11 +1464,7 @@ add_default_displays_and_keyboard (state_t *state)
 
   terminal = ply_terminal_new (state->default_tty);
 
-  /* force frame-buffer plugin for shutdown so it sticks around after getting killed */
-  if (state->mode == PLY_MODE_SHUTDOWN)
-    renderer = ply_renderer_new (PLYMOUTH_PLUGIN_PATH "renderers/frame-buffer.so", NULL, terminal);
-  else
-    renderer = ply_renderer_new (NULL, NULL, terminal);
+  renderer = ply_renderer_new (NULL, NULL, terminal);
 
   if (!ply_renderer_open (renderer))
     {
@@ -2051,44 +2047,108 @@ dump_debug_buffer_to_file (void)
   close (fd);
 }
 
+/* Note: only limited fields can be accessed safely in crash handler */
  #include <termios.h>
  #include <unistd.h>
+ #include <linux/major.h>
+static state_t *state_ref_for_crash_handler;
 static void
 on_crash (int signum)
 {
-    struct termios term_attributes;
-    int fd;
+  char *tty, tmp[128];
+  int vt_number = -1, fd;
 
-    fd = open ("/dev/tty1", O_RDWR | O_NOCTTY);
-    if (fd < 0) fd = open ("/dev/hvc0", O_RDWR | O_NOCTTY);
+  assert (state_ref_for_crash_handler);
 
-    ioctl (fd, KDSETMODE, KD_TEXT);
+  /* try to detect VT number of kernel console */
+  if ((tty = state_ref_for_crash_handler->kernel_console_tty))
+    {
+      if (strncmp (tty, "/dev/", strlen ("/dev/")))
+        {
+          snprintf (tmp, sizeof (tmp), "/dev/%s", tty);
+          tty = tmp;
+        }
 
-    tcgetattr (fd, &term_attributes);
+      do
+        {
+          int major_number, minor_number;
+          struct stat file_attributes;
 
-    term_attributes.c_iflag |= BRKINT | IGNPAR | ICRNL | IXON;
-    term_attributes.c_oflag |= OPOST;
-    term_attributes.c_lflag |= ECHO | ICANON | ISIG | IEXTEN;
+          if ((fd = open (tty, O_RDWR | O_NOCTTY)) < 0)
+            break;
 
-    tcsetattr (fd, TCSAFLUSH, &term_attributes);
+          if (fstat (fd, &file_attributes) != 0)
+            break;
 
-    close (fd);
+          major_number = major (file_attributes.st_rdev);
+          minor_number = minor (file_attributes.st_rdev);
+          if (major_number != TTY_MAJOR ||
+              minor_number > MAX_NR_CONSOLES)
+            break;
 
-    if (debug_buffer != NULL)
-      {
-        dump_debug_buffer_to_file ();
-        sleep (30);
-      }
+          vt_number = minor_number;
+        } while (0);
 
-    if (pid_file != NULL)
-      {
-        unlink (pid_file);
-        free (pid_file);
-        pid_file = NULL;
-      }
+      if (fd > 0) close(fd);
+    }
 
-    signal (signum, SIG_DFL);
-    raise(signum);
+  fd = -1;
+  if ((tty = state_ref_for_crash_handler->default_tty))
+    {
+      if (strncmp (tty, "/dev/", strlen ("/dev/")))
+        {
+          snprintf (tmp, sizeof (tmp), "/dev/%s", tty);
+          tty = tmp;
+        }
+
+      fd = open (tty, O_RDWR | O_NOCTTY);
+    }
+      
+  if (fd < 0) fd = open ("/dev/tty1", O_RDWR | O_NOCTTY);
+  if (fd < 0) fd = open ("/dev/hvc0", O_RDWR | O_NOCTTY);
+
+  if (fd > 0)
+    {
+      struct termios term_attributes;
+      struct vt_mode mode = { 0 };
+
+      ioctl (fd, KDSETMODE, KD_TEXT);
+
+      tcgetattr (fd, &term_attributes);
+
+      term_attributes.c_iflag |= BRKINT | IGNPAR | ICRNL | IXON;
+      term_attributes.c_oflag |= OPOST;
+      term_attributes.c_lflag |= ECHO | ICANON | ISIG | IEXTEN;
+
+      tcsetattr (fd, TCSAFLUSH, &term_attributes);
+
+      signal (SIGUSR1, SIG_DFL);
+      signal (SIGUSR2, SIG_DFL);
+
+      mode.mode = VT_AUTO;
+      ioctl (fd, VT_SETMODE, &mode);
+      if (vt_number > 0)
+        {
+          ioctl (fd, VT_ACTIVATE, vt_number);
+          ioctl (fd, VT_WAITACTIVE, vt_number);
+        }
+    }
+
+  if (debug_buffer != NULL)
+    {
+      dump_debug_buffer_to_file ();
+      sleep (30);
+    }
+
+  if (pid_file != NULL)
+    {
+      unlink (pid_file);
+      free (pid_file);
+      pid_file = NULL;
+    }
+
+  signal (signum, SIG_DFL);
+  raise (signum);
 }
 
 static void
@@ -2226,13 +2286,13 @@ main (int    argc,
   if (debug)
     debug_buffer = ply_buffer_new ();
 
+  /* hold a reference to state, which will be used by on_crash to restore the screen */
+  state_ref_for_crash_handler = &state;
   signal (SIGABRT, on_crash);
   signal (SIGSEGV, on_crash);
-
-  /* If we're shutting down we don't want to die until killed
-   */
-  if (state.mode == PLY_MODE_SHUTDOWN)
-    signal (SIGTERM, SIG_IGN);
+  signal (SIGBUS, on_crash);
+  signal (SIGQUIT, on_crash);
+  signal (SIGTERM, on_crash);
 
   /* before do anything we need to make sure we have a working
    * environment.
